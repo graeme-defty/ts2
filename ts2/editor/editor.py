@@ -35,6 +35,7 @@ from ts2.scenery import abstract, placeitem, lineitem, platformitem, \
     invisiblelinkitem, enditem, pointsitem, textitem
 from ts2.scenery.signals import signalitem
 from ts2.simulation import BUILTIN_OPTIONS
+from ts2.trains import service
 
 translate = QtWidgets.qApp.translate
 
@@ -347,22 +348,7 @@ class Editor(simulation.Simulation):
             del routes[rID]["routeNum"]
         # Services
         for sID, srv in services.copy().items():
-            pa = []
-            if srv.get("autoReverse"):
-                pa.append({
-                    "actionCode": "REVERSE",
-                    "actionParam": None,
-                })
-                del services[sID]["autoReverse"]
-            if srv.get("nextServiceCode"):
-                pa.append({
-                    "actionCode": "SET_SERVICE",
-                    "actionParam": srv.get("nextServiceCode"),
-                })
-                del services[sID]["nextServiceCode"]
-            if not isinstance(srv["plannedTrainType"], str):
-                services[sID]["plannedTrainType"] = ""
-            services[sID]["postActions"] = pa
+            services[sID] = self.updateWithPostActions(srv)
             for i, sl in enumerate(srv["lines"]):
                 services[sID]["lines"][i]["mustStop"] = bool(sl["mustStop"])
         # Trains
@@ -374,6 +360,26 @@ class Editor(simulation.Simulation):
             trns[i]["stoppedTime"] = int(trn["stoppedTime"])
 
         return options, trackItems, routes, trainTypes, services, trns, messageLogger, signalLibrary, fileName
+
+    @staticmethod
+    def updateWithPostActions(srv):
+        pa = []
+        if srv.get("autoReverse"):
+            pa.append({
+                "actionCode": "REVERSE",
+                "actionParam": None,
+            })
+            del srv["autoReverse"]
+        if srv.get("nextServiceCode"):
+            pa.append({
+                "actionCode": "SET_SERVICE",
+                "actionParam": srv.get("nextServiceCode"),
+            })
+            del srv["nextServiceCode"]
+        if not isinstance(srv["plannedTrainType"], str):
+            srv["plannedTrainType"] = ""
+        srv["postActions"] = pa
+        return srv
 
     sceneryIsValidated = QtCore.pyqtSignal(bool)
     trainsChanged = QtCore.pyqtSignal()
@@ -464,14 +470,17 @@ class Editor(simulation.Simulation):
         """Returns the number of realOptions"""
         return len(self._options) - 3
 
-    def place(self, placeCode):
+    def place(self, placeCode, raise_if_not_found=True):
         """Returns the place defined by placeCode. Reimplemented from
         Simulation so as not to rely on the places dictionary."""
-        if placeCode is not None and placeCode != "":
-            for ti in self._trackItems.values():
-                if isinstance(ti, placeitem.Place) \
-                        and ti.placeCode == placeCode:
-                    return ti
+        if not placeCode:
+            return None
+        for ti in self._trackItems.values():
+            if isinstance(ti, placeitem.Place) \
+                    and ti.placeCode == placeCode:
+                return ti
+        if raise_if_not_found:
+            raise KeyError("Unknown Place with code %s" % placeCode)
         return None
 
     def checkSimulation(self):
@@ -481,9 +490,10 @@ class Editor(simulation.Simulation):
                   valid, and False otherwise. If the simulation is not valid,
                   message describes the error.
         """
-        if not self.checkTrackItemsLinks():
-            return False, self.tr("Invalid simulation: Not all items are "
-                                  "linked or end items are missing.")
+        try:
+            self.checkTrackItemsLinks()
+        except utils.FormatException as e:
+            return False, e.args
         for ti in self.trackItems.values():
             try:
                 ti.setupTriggers()
@@ -523,7 +533,6 @@ class Editor(simulation.Simulation):
     def importTrackItemsFromFile(self, fileName):
         with open(fileName, newline='') as csvfile:
             reader = csv.DictReader(csvfile)
-            self._trackItems = collections.OrderedDict()
             trackItems = {}
             for row in reader:
                 ti = row.copy()
@@ -537,16 +546,40 @@ class Editor(simulation.Simulation):
                 for f in objectFields:
                     ti[f] = ti[f] and eval(ti[f]) or {}
                 trackItems[ti['tiId']] = ti
-        self.loadTrackItems(trackItems)
+        for tiId, tiData in trackItems.items():
+            if tiId in self.trackItems:
+                self.trackItems[tiId].updateFromParameters(tiData)
+            else:
+                self.loadTrackItems(trackItems)
         maxID = 1
         for ti in self.trackItems.values():
             try:
                 maxID = max(int(ti.tiId), maxID)
             except ValueError:
                 pass
+            ti.removeAllGraphicsItems()
             ti.initialize(self)
             self.expandBackgroundTo(ti)
         self._nextId = maxID + 1
+
+    def reloadSignalLibrary(self):
+        """Loads the local signal library into this simulation, overriding any existing signal
+        aspect or signal types with the same name."""
+        localSignalLibraryDict = signalitem.SignalLibrary.createSignalLibrary()
+        simSignalLibraryDict = json.loads(json.dumps(self.signalLibrary, separators=(',', ':'),
+                                                     for_json=True, encoding='utf-8'))
+        signalitem.SignalLibrary.update(simSignalLibraryDict, localSignalLibraryDict)
+        self.signalLibrary = signalitem.SignalLibrary(simSignalLibraryDict)
+        self.signalLibrary.initialize()
+        signalitem.signalLibrary = self.signalLibrary
+        # Relink every signal item to the new types based on their name
+        for signal in self.trackItems.values():
+            if not isinstance(signal, signalitem.SignalItem):
+                continue
+            signalTypes = self.signalLibrary.signalTypes
+            signal._signalType = signalTypes.get(
+                signal.signalType.name, signalTypes["UK_3_ASPECTS"]
+            )
 
     def exportRoutesToFile(self, fileName):
         with open(fileName, 'w', newline='') as csvfile:
@@ -651,6 +684,8 @@ class Editor(simulation.Simulation):
     def importServicesFromFile(self, fileName):
         """Imports the services from the ts2 formatted CSV file given by
         fileName, deleting any previous service in the editor if any."""
+        self.servicesModel.beginResetModel()
+        self.serviceLinesModel.beginResetModel()
         self._services = {}
         allowedHeaders = [
             "serviceCode", "description", "nextServiceCode", "autoReverse",
@@ -667,7 +702,7 @@ class Editor(simulation.Simulation):
             # We have empty headers over service line columns
             if header != "":
                 if header not in allowedHeaders:
-                    raise Exception(self.tr(
+                    raise utils.FormatException(self.tr(
                         "Format Error: invalid header %s detected") % header)
                 if header == "places=>":
                     inPlaces = True
@@ -682,6 +717,7 @@ class Editor(simulation.Simulation):
                 params = [p.strip('" \n') for p in params]
                 serviceParameters = dict(zip(headers[:placesIndex],
                                              params[:placesIndex]))
+                serviceParameters = self.updateWithPostActions(serviceParameters)
                 serviceParameters["__type__"] = "Service"
                 lineLength = len(lineHeaders)
                 serviceLines = []
@@ -695,12 +731,11 @@ class Editor(simulation.Simulation):
                         serviceLines.append(lineParameters)
                 serviceParameters["lines"] = serviceLines
                 serviceCode = serviceParameters["serviceCode"]
-                jsonStr = json.dumps(serviceParameters, encoding='utf-8')
-                self.services[serviceCode] = json.loads(
-                    jsonStr, object_hook=json_hook, encoding='utf-8'
-                )
-                self.services[serviceCode].initialize(self)
+                self._services[serviceCode] = service.Service(serviceParameters)
+                self._services[serviceCode].initialize(self)
         file.close()
+        self.servicesModel.endResetModel()
+        self.serviceLinesModel.endResetModel()
 
     def registerGraphicsItem(self, graphicItem):
         """Adds the graphicItem to the scene or to the libraryScene.
@@ -876,14 +911,21 @@ class Editor(simulation.Simulation):
         TrackItems, checks and set sceneryValidated to True if succeeded"""
         self.updatePlaces()
         self.createTrackItemsLinks()
-        if self.checkTrackItemsLinks():
-            self.sceneryIsValidated.emit(True)
-            self._sceneryValidated = True
-            return True
-        else:
-            self.sceneryIsValidated.emit(False)
+
+        try:
+            self.checkTrackItemsLinks()
+        except utils.FormatException as e:
+            QtWidgets.QMessageBox.warning(
+                self.simulationWindow,
+                self.tr("Error in simulation"),
+                str(e),
+                QtWidgets.QMessageBox.Ok
+            )
             self._sceneryValidated = False
-            return False
+            return
+        self.sceneryIsValidated.emit(True)
+        self._sceneryValidated = True
+        return True
 
     @QtCore.pyqtSlot()
     def invalidateScenery(self):
@@ -1116,6 +1158,8 @@ class Editor(simulation.Simulation):
             pos = self.getValidPosition()
             if pos is None:
                 raise Exception("No valid position found. Check scenery.")
+            if not self.trainTypes:
+                raise Exception("No rolling stock found. Check Train Types tab")
             parameters = {
                 "serviceCode": list(self.services.values())[0].serviceCode,
                 "trainTypeCode": list(self.trainTypes.values())[0].code,

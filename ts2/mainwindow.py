@@ -781,7 +781,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def onRecent(self, act):
         """Open a  recent item"""
-        self.loadSimulation(fileName=act.text())
+        self.loadSimulation(fileName=act.iconText())
 
     def closeEvent(self, event):
         """Save window postions on close"""
@@ -820,7 +820,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def onPlaceSelected(self):
         place = placeitem.Place.selectedPlaceModel.place
-        self.lblPlaceInfoName.setText(place.name)
+        if place:
+            self.lblPlaceInfoName.setText(place.name)
 
     def setControlsDisabled(self, state):
         if not state and self.fileName:

@@ -473,10 +473,11 @@ class ServiceLinesModel(QtCore.QAbstractTableModel):
     @QtCore.pyqtSlot(str)
     def setServiceCode(self, serviceCode):
         """Sets the service linked with this model from its serviceCode."""
-        if serviceCode is None:
-            return
         self.beginResetModel()
-        self._service = self._editor.service(serviceCode)
+        if not serviceCode:
+            self._service = None
+        else:
+            self._service = self._editor.service(serviceCode)
         self.endResetModel()
 
     @property
@@ -509,7 +510,10 @@ class Service:
         self._plannedTrainType = parameters.get("plannedTrainType")
         self._current = None
         self.simulation = None
-        self._lines = parameters.get("lines", [])
+        lines = []
+        for lineData in parameters.get("lines", []):
+            lines.append(ServiceLine(lineData))
+        self._lines = lines
 
     def initialize(self, simulation):
         """Initialize the service once the simulation is loaded."""

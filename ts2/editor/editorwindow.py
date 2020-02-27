@@ -17,7 +17,7 @@
 #   Free Software Foundation, Inc.,
 #   59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #
-
+import os
 import zipfile
 
 import ts2.editor.views
@@ -65,6 +65,11 @@ class EditorWindow(QtWidgets.QMainWindow):
         self.openAction.setToolTip(openActionTip)
         self.openAction.setStatusTip(openActionTip)
         self.openAction.triggered.connect(self.loadSimulation)
+
+        self.openRecentAction = QtWidgets.QAction(self.tr("Recent"), self)
+        menu = QtWidgets.QMenu()
+        self.openRecentAction.setMenu(menu)
+        menu.triggered.connect(self.onRecent)
 
         self.saveAction = QtWidgets.QAction(self.tr("&Save"), self)
         self.saveAction.setShortcut(QtGui.QKeySequence.Save)
@@ -152,6 +157,7 @@ class EditorWindow(QtWidgets.QMainWindow):
         self.fileMenu = self.menuBar().addMenu(self.tr("&File"))
         self.fileMenu.addAction(self.newAction)
         self.fileMenu.addAction(self.openAction)
+        self.fileMenu.addAction(self.openRecentAction)
         self.fileMenu.addAction(self.saveAction)
         self.fileMenu.addAction(self.saveAsAction)
         self.fileMenu.addSeparator()
@@ -286,6 +292,17 @@ class EditorWindow(QtWidgets.QMainWindow):
         self.importTrackItemsBtn.setText(self.tr("Import"))
         self.importTrackItemsBtn.clicked.connect(self.importTrackItemsBtnClicked)
         tbgsc.addWidget(self.importTrackItemsBtn)
+
+        toolbarScenery.addSeparator()
+
+        tbgsl = widgets.ToolBarGroup(title=self.tr("Signal Library"))
+        toolbarScenery.addWidget(tbgsl)
+
+        # Reload signal library
+        self.reloadSignalLibraryBtn = QtWidgets.QToolButton(self.sceneryWidget)
+        self.reloadSignalLibraryBtn.setText(self.tr("Reload"))
+        self.reloadSignalLibraryBtn.clicked.connect(self.reloadSignalLibrary)
+        tbgsl.addWidget(self.reloadSignalLibraryBtn)
 
         toolbarScenery.addSeparator()
 
@@ -547,6 +564,7 @@ class EditorWindow(QtWidgets.QMainWindow):
         self.setStatusBar(sbar)
 
         settings.restoreWindow(self)
+        self.refreshRecent()
         self.onServiceViewSelectionChanged(None)
         self.onServiceLinesViewSelectionChanged()
         self.onTrainTypesSelectionChanged()
@@ -682,6 +700,21 @@ class EditorWindow(QtWidgets.QMainWindow):
         else:
             self.propertiesView.setModel(None)
 
+    def refreshRecent(self):
+        """Reload the recent menu"""
+        menu = self.openRecentAction.menu()
+        menu.clear()
+        act = []
+        for fileName in settings.getEditorRecent():
+            if not fileName:
+                continue
+            if os.path.exists(fileName):
+                act.append(menu.addAction(fileName))
+
+    def onRecent(self, act):
+        """Open a  recent item"""
+        self.loadSimulation(fileName=act.iconText())
+
     @QtCore.pyqtSlot()
     def loadSimulation(self, fileName=None):
         """Loads the simulation from ts2 file"""
@@ -737,6 +770,8 @@ class EditorWindow(QtWidgets.QMainWindow):
                                              timeout=2)
                 self.statusBar().showBusy(False)
                 self._dirty = False
+                settings.addEditorRecent(fileName)
+                self.refreshRecent()
             finally:
                 QtWidgets.qApp.restoreOverrideCursor()
 
@@ -754,6 +789,7 @@ class EditorWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
         ) == QtWidgets.QMessageBox.Yes:
             self.editor.save()
+            settings.addEditorRecent(self.editor.fileName)
         QtWidgets.qApp.restoreOverrideCursor()
 
     @QtCore.pyqtSlot()
@@ -871,6 +907,26 @@ class EditorWindow(QtWidgets.QMainWindow):
         self.editor.validateScenery()
         self.setDirty("Validated scenery")
         QtWidgets.qApp.restoreOverrideCursor()
+
+    @QtCore.pyqtSlot()
+    def reloadSignalLibrary(self):
+        """Loads the local signal library into this simulation, overriding any existing signal
+        aspect or signal types with the same name."""
+        if QtWidgets.QMessageBox.question(
+            self,
+            self.tr("Reload Signal Library"),
+            self.tr("Are you sure you want to reload the signal library ?\n"
+                    "Signal aspects and signal types of the simulation will "
+                    "be overwritten by those of the local signal library."),
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+        ) == QtWidgets.QMessageBox.Yes:
+            self.editor.reloadSignalLibrary()
+            QtWidgets.QMessageBox.information(
+                self,
+                self.tr("Signal Library reloaded"),
+                self.tr("The Signal Library has been reloaded"),
+                QtWidgets.QMessageBox.Ok
+            )
 
     @QtCore.pyqtSlot()
     def delRouteBtnClicked(self):
@@ -1103,7 +1159,15 @@ class EditorWindow(QtWidgets.QMainWindow):
                     QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
             ) == QtWidgets.QMessageBox.Yes:
                 QtWidgets.qApp.setOverrideCursor(Qt.WaitCursor)
-                self.editor.importServicesFromFile(fileName)
+                try:
+                    self.editor.importServicesFromFile(fileName)
+                except Exception as e:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        self.tr("Import services"),
+                        str(e),
+                        QtWidgets.QMessageBox.Ok
+                    )
                 QtWidgets.qApp.restoreOverrideCursor()
 
     @QtCore.pyqtSlot()
@@ -1134,12 +1198,22 @@ class EditorWindow(QtWidgets.QMainWindow):
             if QtWidgets.QMessageBox.warning(
                     self,
                     self.tr("Import track items"),
-                    self.tr("This will erase any existing item\n"
+                    self.tr("This will update any existing item with the data from the CSV file\n"
+                            "and create items that do not exist. Existing items that are not\n"
+                            "in the CSV file will stay untouched."
                             "Are you sure you want to continue?"),
                     QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
             ) == QtWidgets.QMessageBox.Yes:
                 QtWidgets.qApp.setOverrideCursor(Qt.WaitCursor)
-                self.editor.importTrackItemsFromFile(fileName)
+                try:
+                    self.editor.importTrackItemsFromFile(fileName)
+                except Exception as e:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        self.tr("Import track items"),
+                        str(e),
+                        QtWidgets.QMessageBox.Ok
+                    )
                 QtWidgets.qApp.restoreOverrideCursor()
 
     @QtCore.pyqtSlot()
@@ -1175,7 +1249,15 @@ class EditorWindow(QtWidgets.QMainWindow):
                     QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
             ) == QtWidgets.QMessageBox.Yes:
                 QtWidgets.qApp.setOverrideCursor(Qt.WaitCursor)
-                self.editor.importRoutesFromFile(fileName)
+                try:
+                    self.editor.importRoutesFromFile(fileName)
+                except Exception as e:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        self.tr("Import route"),
+                        str(e),
+                        QtWidgets.QMessageBox.Ok
+                    )
                 QtWidgets.qApp.restoreOverrideCursor()
 
     @QtCore.pyqtSlot()
@@ -1211,7 +1293,15 @@ class EditorWindow(QtWidgets.QMainWindow):
                     QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
             ) == QtWidgets.QMessageBox.Yes:
                 QtWidgets.qApp.setOverrideCursor(Qt.WaitCursor)
-                self.editor.importTrainTypesFromFile(fileName)
+                try:
+                    self.editor.importTrainTypesFromFile(fileName)
+                except Exception as e:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        self.tr("Import train types"),
+                        str(e),
+                        QtWidgets.QMessageBox.Ok
+                    )
                 QtWidgets.qApp.restoreOverrideCursor()
 
     @QtCore.pyqtSlot()
@@ -1242,7 +1332,15 @@ class EditorWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
         ) == QtWidgets.QMessageBox.Yes:
             QtWidgets.qApp.setOverrideCursor(Qt.WaitCursor)
-            self.editor.setupTrainsFromServices()
+            try:
+                self.editor.setupTrainsFromServices()
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    self.tr("Setup trains from services"),
+                    str(e),
+                    QtWidgets.QMessageBox.Ok
+                )
             QtWidgets.qApp.restoreOverrideCursor()
 
     @QtCore.pyqtSlot()

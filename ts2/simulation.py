@@ -221,9 +221,6 @@ class Simulation(QtCore.QObject):
         for serviceCode, dct in services.items():
             dct["serviceCode"] = serviceCode
             lines = []
-            for line in dct["lines"]:
-                lines.append(service.ServiceLine(line))
-            dct["lines"] = lines
             self._services[serviceCode] = service.Service(dct)
 
     def loadTrains(self, trns):
@@ -244,10 +241,7 @@ class Simulation(QtCore.QObject):
         self.updatePlaces()
         for ti in self._trackItems.values():
             ti.initialize(self)
-        if not self.checkTrackItemsLinks():
-            raise utils.FormatException(
-                self.tr("Invalid simulation: Not all items are linked.")
-            )
+        self.checkTrackItemsLinks()
 
         for rte in self.routes.values():
             rte.initialize(self)
@@ -467,16 +461,16 @@ class Simulation(QtCore.QObject):
         """
         return self._trackItems.get(tiId, None)
 
-    def place(self, placeCode):
+    def place(self, placeCode, raise_if_not_found=True):
         """
         :param str placeCode:
+        :param bool raise_if_not_found:
         :return: a place defined by placeCode.
         :rtype:  :class:`~ts2.scenery.placeitem.Place` or ``None``
         """
-        if placeCode is not None and placeCode != "":
-            return self._places[placeCode]
-        else:
+        if not placeCode:
             return None
+        return self._places[placeCode]
 
     @property
     def places(self):
@@ -571,10 +565,13 @@ class Simulation(QtCore.QObject):
             self._selectedSignal = si
         else:
             # Second signal selected
-            r = self.findRoute(self._selectedSignal, si)
-            if r is not None:
-                # There exists a route between both signals
-                r.activate(persistent)
+            routes = self.findRoutes(self._selectedSignal, si)
+            if routes:
+                # There exists at least a route between both signals
+                log_message = len(routes) == 1
+                for r in routes:
+                    # Mute messages if we have more than one route, because at least one will fail.
+                    r.activate(persistent, log_message)
                 self._selectedSignal.unselect()
                 self._selectedSignal = None
                 si.unselect()
@@ -668,21 +665,22 @@ class Simulation(QtCore.QObject):
             if isinstance(ti, placeitem.Place):
                 self._places[ti.placeCode] = ti
 
-    def findRoute(self, si1, si2):
-        """Checks whether a route exists between two signals.
+    def findRoutes(self, si1, si2):
+        """Returns routes between two signals.
 
         :param si1: The :class:`~ts2.scenery.signals.signalitem.SignalItem` of
         the first signal
         :param si2: The :class:`~ts2.scenery.signals.signalitem.SignalItem` of
         the second signal
-        :return: The route between signal si1 and si2 if it exists, otherwise
-        None
+        :return: A list of routes between si1 and si2 ordered by route number
         :rtype: :class:`~ts2.routing.route.Route` or None
         """
+        routes = []
         for r in self._routes.values():
             if r.links(si1, si2):
-                return r
-        return None
+                routes.append(r)
+        routes.sort(key=lambda x: x.routeNum)
+        return routes
 
     def createTrackItemsLinks(self):
         """Find the items that are linked together through their coordinates
@@ -722,19 +720,17 @@ class Simulation(QtCore.QObject):
         """
         :return: Checks that all :class:`~ts2.scenery.abstract.TrackItem`'s are
         linked together
-        :rtype: bool
+        :raises FormatException if items are not linked.
 
         """
-        result = True
         for ti in self._trackItems.values():
             if not isinstance(ti, placeitem.Place) \
                     and not isinstance(ti, platformitem.PlatformItem) \
                     and not isinstance(ti, textitem.TextItem):
                 if ti.nextItem is None and not isinstance(ti, enditem.EndItem):
-                    result = False
+                    raise utils.FormatException("Item %s not linked to a next item" % ti.tiId)
                 if ti.previousItem is None:
-                    result = False
-        return result
+                    raise utils.FormatException("Item %s not linked to a previous item" % ti.tiId)
 
     @staticmethod
     def distanceBetween(p1, p2):

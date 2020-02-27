@@ -128,14 +128,60 @@ class SignalItem(abstract.TrackItem):
 
     SIGNAL_GRAPHIC_ITEM = 0
     BERTH_GRAPHIC_ITEM = 1
+    SIGNAL_NUMBER_ITEM = 2
 
     def __init__(self, parameters):
         """
         :param dict parameters:
         """
-        super().__init__(parameters)
-        reverse = bool(parameters.get("reverse", 0))
+        self._reverse = False
         self._signalType = None
+        self._berthOrigin = QtCore.QPointF()
+        self._berthRect = None
+        super().__init__(parameters)
+        self.setBerthRect()
+        self._activeAspect = signalLibrary.signalAspects.get(parameters.get("activeAspect"))
+        self._previousActiveRoute = None
+        self._nextActiveRoute = None
+        self._trainId = None
+        self.defaultZValue = 50
+        sgi = helper.TrackGraphicsItem(self, SignalItem.SIGNAL_GRAPHIC_ITEM)
+        sgi.setPos(self.origin)
+        sgi.setCursor(Qt.PointingHandCursor)
+        sgi.setToolTip(self.toolTipText)
+        sgi.setZValue(self.defaultZValue)
+        if self._reverse:
+            sgi.setRotation(180)
+        self._gi[SignalItem.SIGNAL_GRAPHIC_ITEM] = sgi
+        bgi = helper.TrackGraphicsItem(self, SignalItem.BERTH_GRAPHIC_ITEM)
+        bgi.setPos(self._berthOrigin)
+        bgi.setCursor(Qt.PointingHandCursor)
+        bgi.setZValue(self.defaultZValue)
+        self._gi[SignalItem.BERTH_GRAPHIC_ITEM] = bgi
+        self.lightOn = True
+
+    def display_signal_number(self):
+        sni = QtWidgets.QGraphicsSimpleTextItem()
+        font = sni.font()
+        font.setPixelSize(8)
+        font.setFamily("Courier New")
+        sni.setFont(font)
+        brush = sni.brush()
+        brush.setColor(Qt.white)
+        sni.setBrush(brush)
+        if self._reverse:
+            sni.setText(self.name)
+            sni.setPos(self.origin + QtCore.QPointF(0, 2))
+        else:
+            txt = (" " * 5 + self.name)[-5:]
+            sni.setText(txt)
+            sni.setPos(self.origin + QtCore.QPointF(-24, -10))
+        sni.setZValue(1)
+        self._gi[SignalItem.SIGNAL_NUMBER_ITEM] = sni
+
+    def updateFromParameters(self, parameters):
+        super(SignalItem, self).updateFromParameters(parameters)
+        reverse = bool(parameters.get("reverse", 0))
         for key, customProperty in signalLibrary.tiProperties.items():
             # Initialize backend vars for custom properties
             propName = "_" + customProperty.name[:-3]
@@ -150,28 +196,7 @@ class SignalItem(abstract.TrackItem):
         except ValueError:
             yb = self.origin.y() + 5
         self._berthOrigin = QtCore.QPointF(xb, yb)
-        self._berthRect = None
-        self.setBerthRect()
-        self._activeAspect = signalLibrary.signalAspects.get(parameters.get("activeAspect"))
         self._reverse = reverse
-        self._previousActiveRoute = None
-        self._nextActiveRoute = None
-        self._trainId = None
-        self.defaultZValue = 50
-        sgi = helper.TrackGraphicsItem(self, SignalItem.SIGNAL_GRAPHIC_ITEM)
-        sgi.setPos(self.origin)
-        sgi.setCursor(Qt.PointingHandCursor)
-        sgi.setToolTip(self.toolTipText)
-        sgi.setZValue(self.defaultZValue)
-        if reverse:
-            sgi.setRotation(180)
-        self._gi[SignalItem.SIGNAL_GRAPHIC_ITEM] = sgi
-        bgi = helper.TrackGraphicsItem(self, SignalItem.BERTH_GRAPHIC_ITEM)
-        bgi.setPos(self._berthOrigin)
-        bgi.setCursor(Qt.PointingHandCursor)
-        bgi.setZValue(self.defaultZValue)
-        self._gi[SignalItem.BERTH_GRAPHIC_ITEM] = bgi
-        self.lightOn = True
 
     def initialize(self, simulation):
         """Initialize the signal item once everything is loaded."""
@@ -194,6 +219,7 @@ class SignalItem(abstract.TrackItem):
         if simulation.context == utils.Context.GAME:
             self.signalSelected.connect(simulation.activateRoute)
             self.signalUnselected.connect(simulation.desactivateRoute)
+            self.display_signal_number()
         else:
             self.signalSelected.connect(simulation.prepareRoute)
             self.signalUnselected.connect(simulation.deselectRoute)
@@ -890,7 +916,10 @@ def condition(cls):
 
         def _propertyStrSetter(self, value):
             if self.simulation.context == utils.Context.EDITOR_SCENERY:
-                value = collections.OrderedDict(eval(str(value)))
+                try:
+                    value = collections.OrderedDict(eval(str(value)))
+                except (ValueError, SyntaxError, NameError):
+                    value = self.signalType.getCustomParams(self).get(cls.code)
                 if isinstance(value, dict):
                     setattr(self, "_" + propName, value)
                 else:
